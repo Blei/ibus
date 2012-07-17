@@ -22,6 +22,12 @@
 
 libibus = $(top_builddir)/src/libibus-@IBUS_API_VERSION@.la
 
+weston_dir = /home/philipp/programming/weston
+weston_client_ldadd = \
+	$(weston_dir)/clients/libtoytoolkit.a \
+	$(weston_dir)/shared/libshared.la \
+	$(NULL)
+
 bin_PROGRAMS = ibus-wayland
 
 ibus_wayland_SOURCES = \
@@ -35,11 +41,21 @@ ibus_wayland_DEPENDENCIES = \
 ibus_wayland_LDADD = \
 	$(libibus) \
 	@GTK2_LIBS@ \
+	@WAYLAND_CLIENT_LIBS@ \
+	@WAYLAND_EGL_LIBS@ \
+	@WAYLAND_CURSOR_LIBS@ \
+	$(weston_client_ldadd) \
+	-lxkbcommon -ljpeg -lEGL -lm \
+	$(weston_dir)/clients/text-protocol.o \
 	$(NULL)
 
 ibus_wayland_CFLAGS = \
 	@GTK2_CFLAGS@ \
 	@DBUS_CFLAGS@ \
+	@WAYLAND_CLIENT_CFLAGS@ \
+	@WAYLAND_EGL_CFLAGS@ \
+	@WAYLAND_CURSOR_CFLAGS@ \
+	-I$(weston_dir)/clients \
 	-I$(top_srcdir)/src \
 	-I$(top_builddir)/src \
 	$(NULL)

@@ -224,6 +224,21 @@ else
     enable_gtk3="no (disabled, use --enable-gtk3 to enable)"
 fi
 
+if test x"$enable_wayland" = x"yes"; then
+    # Check for wayland libs
+    PKG_CHECK_MODULES(WAYLAND_CLIENT, [
+        wayland-client
+    ])
+    PKG_CHECK_MODULES(WAYLAND_EGL, [
+        wayland-egl
+    ])
+    PKG_CHECK_MODULES(WAYLAND_CURSOR, [
+        wayland-cursor
+    ])
+else
+    enable_wayland="no (disabled, use --enable-wayland to enable)"
+fi
+
 if test x"$enable_xim" = x"yes"; then
     # Check for x11
     PKG_CHECK_MODULES(X11, [
