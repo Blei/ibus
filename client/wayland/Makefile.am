@@ -20,27 +20,43 @@
 # Free Software Foundation, Inc., 59 Temple Place, Suite 330,
 # Boston, MA  02111-1307  USA
 
-if ENABLE_GTK2
-GTK2 = gtk2
-endif
+libibus = $(top_builddir)/src/libibus-@IBUS_API_VERSION@.la
 
-if ENABLE_GTK3
-GTK3 = gtk3
-endif
+bin_PROGRAMS = ibus-wayland
 
-if ENABLE_WAYLAND
-WAYLAND = wayland
-endif
-
-if ENABLE_XIM
-X11 = x11
-endif
-
-SUBDIRS = \
-	$(GTK2) \
-	$(GTK3) \
-	$(WAYLAND) \
-	$(X11) \
+ibus_wayland_SOURCES = \
+	main.c \
 	$(NULL)
+
+ibus_wayland_DEPENDENCIES = \
+	$(libibus) \
+	$(NULL)
+
+ibus_wayland_LDADD = \
+	$(libibus) \
+	@GTK2_LIBS@ \
+	$(NULL)
+
+ibus_wayland_CFLAGS = \
+	@GTK2_CFLAGS@ \
+	@DBUS_CFLAGS@ \
+	-I$(top_srcdir)/src \
+	-I$(top_builddir)/src \
+	$(NULL)
+
+noinst_HEADERS = \
+	locales.h \
+	$(NULL)
+
+$(libibus):
+	(cd $(top_builddir)/src; make)
+
+locales.h:
+	( \
+		locale -a | \
+		gawk -F _ '{ if (length($$1) <= 3) print $$1 }' | \
+		uniq | sort | \
+		xargs python2 -c 'import sys;print "#define LOCALES_STRING \"%s\"" % ",".join(sys.argv[1:])' \
+	 ) > $@
 
 -include $(top_srcdir)/git.mk

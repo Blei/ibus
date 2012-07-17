@@ -164,6 +164,15 @@ AC_ARG_ENABLE(xim,
 )
 AM_CONDITIONAL([ENABLE_XIM], [test x"$enable_xim" = x"yes"])
 
+# --disable-wayland option.
+AC_ARG_ENABLE(wayland,
+    AS_HELP_STRING([--disable-wayland],
+                   [Do not build Wayland immodule]),
+    [enable_wayland=$enableval],
+    [enable_wayland=yes]
+)
+AM_CONDITIONAL([ENABLE_WAYLAND], [test x"$enable_wayland" = x"yes"])
+
 # --disable-vala option.
 AC_ARG_ENABLE(vala,
     AS_HELP_STRING([--disable-vala],
@@ -179,7 +188,8 @@ if test x"$enable_vala" != x"yes"; then
     enable_vala="no (disabled, use --enable-vala to enable)"
 fi
 
-if test x"$enable_gtk2" = x"yes" -o x"$enable_xim" = x"yes" ; then
+if test x"$enable_gtk2" = x"yes" -o x"$enable_xim" = x"yes" \
+        -o x"$enable_wayland" = x"yes"; then
     # check for gtk2
     PKG_CHECK_MODULES(GTK2, [
         gtk+-2.0
@@ -450,6 +460,7 @@ memconf/memconf.xml.in
 client/Makefile
 client/gtk2/Makefile
 client/gtk3/Makefile
+client/wayland/Makefile
 client/x11/Makefile
 src/Makefile
 src/ibusversion.h
@@ -496,6 +507,7 @@ Build options:
   Build gtk2 immodule       $enable_gtk2
   Build gtk3 immodule       $enable_gtk3
   Build XIM agent server    $enable_xim
+  Build Wayland immodule    $enable_wayland
   Build python modules      $enable_python
   Build gconf modules       $enable_gconf
   Build memconf modules     $enable_memconf
