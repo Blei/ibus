@@ -105,7 +105,6 @@ input_method_keymap(void *data,
                     uint32_t size)
 {
     struct ibus_ime *ime = data;
-    fprintf(stderr, "received keymap\n");
 
     // XXX: this is copy-pasted from window.c
     char *map_str;
@@ -198,7 +197,6 @@ input_method_key(void *data,
                  uint32_t state_w)
 {
     struct ibus_ime *ime = data;
-    fprintf(stderr, "received key %d\n", key);
 
     // XXX: copied from window.c
     uint32_t code, num_syms;
@@ -244,8 +242,6 @@ input_method_key(void *data,
         event.hardware_keycode - 8,
         event.state);
 
-    fprintf(stderr, "input has %sbeen processed\n", retval ? "" : "not ");
-
     if (!retval) {
         // The key event could not be processed correctly.
         // TODO forward the key event to the application
@@ -262,7 +258,6 @@ input_method_modifiers(void *data,
                        uint32_t group)
 {
     struct ibus_ime *ime = data;
-    //fprintf(stderr, "received modifiers %d\n", mods_depressed);
 
     // XXX: copied from window.c
     xkb_state_update_mask(ime->xkb.state, mods_depressed, mods_latched,
@@ -300,8 +295,6 @@ _context_commit_text_cb (IBusInputContext *context,
     g_assert (IBUS_IS_TEXT (text));
     g_assert (ime != NULL);
 
-    fprintf(stderr, "commit with text '%s'\n", text->text);
-
     input_method_commit_string(ime->input_method, text->text, -1);
 }
 
@@ -314,9 +307,61 @@ _context_forward_key_event_cb (IBusInputContext *context,
 {
     g_assert (ime);
 
-    fprintf(stderr, "forward key with keyval '%d'\n", keyval);
-
     // TODO implement this as soon as wayland/weston supports it
+}
+
+static void
+_send_preedit(struct ibus_ime *ime)
+{
+    int i;
+    IBusAttribute *ibus_attr;
+
+    input_method_preedit_string(ime->input_method, ime->preedit_string,
+                                ime->preedit_cursor);
+
+    for (i = 0; (ibus_attr = ibus_attr_list_get(ime->preedit_attrs, i)) != NULL ; ++i) {
+        uint32_t type, value;
+
+        uint32_t start = ibus_attr->start_index;
+        uint32_t end = ibus_attr->end_index;
+
+        switch (ibus_attr->type) {
+        case IBUS_ATTR_TYPE_UNDERLINE:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_UNDERLINE;
+            switch (ibus_attr->value) {
+            case IBUS_ATTR_UNDERLINE_NONE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_NONE;
+                break;
+            case IBUS_ATTR_UNDERLINE_SINGLE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_SINGLE;
+                break;
+            case IBUS_ATTR_UNDERLINE_DOUBLE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_DOUBLE;
+                break;
+            case IBUS_ATTR_UNDERLINE_LOW:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_LOW;
+                break;
+            case IBUS_ATTR_UNDERLINE_ERROR:
+                // FIXME should we support this?
+                continue;
+            default:
+                assert(false && "unknown ibus underline type");
+            }
+            break;
+
+        case IBUS_ATTR_TYPE_FOREGROUND:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_FOREGROUND;
+            value = ibus_attr->value;
+            break;
+        case IBUS_ATTR_TYPE_BACKGROUND:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_BACKGROUND;
+            value = ibus_attr->value;
+            break;
+        default:
+            assert(false && "unknown ibus attribute type");
+        }
+        input_method_preedit_styling(ime->input_method, type, value, start, end);
+    }
 }
 
 static void
@@ -326,8 +371,7 @@ _update_preedit(struct ibus_ime *ime)
         if (!ime->preedit_started) {
             ime->preedit_started = true;
         }
-        input_method_preedit_string(ime->input_method, ime->preedit_string,
-                                    ime->preedit_cursor);
+        _send_preedit(ime);
     } else if (ime->preedit_started) {
         input_method_preedit_string(ime->input_method, "", 0);
         ime->preedit_started = false;
@@ -344,8 +388,6 @@ _context_update_preedit_text_cb (IBusInputContext *context,
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     g_assert (IBUS_IS_TEXT (text));
     g_assert (ime);
-
-    fprintf(stderr, "update preedit with string '%s'\n", text->text);
 
     if (ime->preedit_string) {
         free(ime->preedit_string);
@@ -372,8 +414,6 @@ _context_show_preedit_text_cb (IBusInputContext *context,
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     g_assert (ime);
 
-    fprintf(stderr, "show preedit\n");
-
     ime->preedit_visible = true;
     _update_preedit (ime);
 }
@@ -384,8 +424,6 @@ _context_hide_preedit_text_cb (IBusInputContext *context,
 {
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     g_assert (ime);
-
-    fprintf(stderr, "hide preedit\n");
 
     ime->preedit_visible = false;
     _update_preedit (ime);
@@ -398,8 +436,6 @@ _context_enabled_cb (IBusInputContext *context,
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     g_assert (ime);
 
-    fprintf(stderr, "enabled\n");
-
     // Is there anything that needs to be done here?
 }
 
@@ -409,8 +445,6 @@ _context_disabled_cb (IBusInputContext *context,
 {
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     g_assert (ime);
-
-    fprintf(stderr, "disabled\n");
 
     reset_ibus_ime(ime);
 }
