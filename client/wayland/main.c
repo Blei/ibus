@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/epoll.h>
 
 #include <gdk/gdk.h>
 
@@ -56,6 +57,13 @@ struct ibus_ime {
     bool preedit_started;
 
     bool focused;
+};
+
+struct ibus_ime_source {
+    GSource source;
+    GPollFD poll_fd;
+
+    struct ibus_ime *ime;
 };
 
 static void
@@ -464,6 +472,93 @@ init_ibus (struct ibus_ime *ime)
     _init_ibus_context(ime);
 }
 
+gboolean
+ibus_source_prepare(GSource *source,
+                    gint *timeout)
+{
+    // This is a "poll source". Wait indefinitely.
+    *timeout = -1;
+    return FALSE;
+}
+
+gboolean
+ibus_source_check(GSource *source)
+{
+    struct ibus_ime_source *ime_source = (struct ibus_ime_source *) source;
+    if (ime_source->poll_fd.revents & G_IO_ERR) {
+        fprintf(stderr, "Error while polling\n");
+        exit(1);
+    }
+    if (!(ime_source->poll_fd.revents & G_IO_IN))
+        return FALSE;
+
+    struct epoll_event ep;
+
+    // Just to test if at least one fd is readable
+    int count = epoll_wait(ime_source->poll_fd.fd,
+                           &ep, 1, 0);
+    if (count < 0) {
+        perror("epoll");
+        abort();
+    }
+
+    return count == 1 ? TRUE : FALSE;
+}
+
+gboolean
+ibus_source_dispatch(GSource *source,
+                     GSourceFunc callback,
+                     gpointer user_data)
+{
+    struct ibus_ime_source *ime_source = (struct ibus_ime_source *) source;
+
+    display_iteration_deferred(ime_source->ime->display);
+    display_iteration_epoll(ime_source->ime->display, 0);
+
+    // FIXME: what's the significance of the return value?
+    return TRUE;
+}
+
+static GSourceFuncs ibus_source_funcs = {
+    ibus_source_prepare,
+    ibus_source_check,
+    ibus_source_dispatch,
+    NULL // finalize is not needed
+};
+
+static void
+run_main_loop (struct ibus_ime *ime)
+{
+    GSource *source = g_source_new(&ibus_source_funcs,
+                                   sizeof(struct ibus_ime_source));
+    struct ibus_ime_source *ibus_ime_source = (struct ibus_ime_source *) source;
+    ibus_ime_source->ime = ime;
+
+    /* This works because (quote from epoll (7)):
+     *
+     * Q3  Is the epoll file descriptor itself poll/epoll/selectable?
+     * A3  Yes. If an epoll file descriptor has events waiting then it
+     *     will indicate as being readable.
+     */
+    ibus_ime_source->poll_fd.fd = display_get_epoll_fd(ime->display);
+    ibus_ime_source->poll_fd.events = G_IO_IN;
+
+    g_source_add_poll(source, &ibus_ime_source->poll_fd);
+
+    GMainContext *context = g_main_context_default();
+    g_source_attach(source, context);
+
+    // run the deferred display tasks before starting the main loop. this is
+    // needed to bootstrap the process (run global handlers and registration).
+    display_iteration_deferred(ime->display);
+
+    GMainLoop *main_loop = g_main_loop_new(context, TRUE);
+    g_main_loop_run(main_loop);
+
+    g_main_loop_unref(main_loop);
+    g_source_unref(source);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -498,9 +593,7 @@ main(int argc, char *argv[])
 
     display_set_user_data(ime.display, &ime);
 
-    // XXX integrate the weston & glib main loops!
-    // maybe add the epolls called in display_run as a GSoure?
-    display_run(ime.display);
+    run_main_loop(&ime);
 
     g_object_unref (ime.bus);
     xkb_state_unref(ime.xkb.state);
