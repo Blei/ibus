@@ -188,8 +188,7 @@ if test x"$enable_vala" != x"yes"; then
     enable_vala="no (disabled, use --enable-vala to enable)"
 fi
 
-if test x"$enable_gtk2" = x"yes" -o x"$enable_xim" = x"yes" \
-        -o x"$enable_wayland" = x"yes"; then
+if test x"$enable_gtk2" = x"yes" -o x"$enable_xim" = x"yes"; then
     # check for gtk2
     PKG_CHECK_MODULES(GTK2, [
         gtk+-2.0
@@ -226,14 +225,13 @@ fi
 
 if test x"$enable_wayland" = x"yes"; then
     # Check for wayland libs
-    PKG_CHECK_MODULES(WAYLAND_CLIENT, [
+    PKG_CHECK_MODULES(WAYLAND, [
         wayland-client
-    ])
-    PKG_CHECK_MODULES(WAYLAND_EGL, [
         wayland-egl
-    ])
-    PKG_CHECK_MODULES(WAYLAND_CURSOR, [
         wayland-cursor
+    ])
+    PKG_CHECK_MODULES(CAIRO, [
+        cairo
     ])
 else
     enable_wayland="no (disabled, use --enable-wayland to enable)"

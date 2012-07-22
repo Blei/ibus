@@ -40,21 +40,19 @@ ibus_wayland_DEPENDENCIES = \
 
 ibus_wayland_LDADD = \
 	$(libibus) \
-	@GTK2_LIBS@ \
-	@WAYLAND_CLIENT_LIBS@ \
-	@WAYLAND_EGL_LIBS@ \
-	@WAYLAND_CURSOR_LIBS@ \
+	@GLIB2_LIBS@ \
+	@CAIRO_LIBS@ \
+	@WAYLAND_LIBS@ \
 	$(weston_client_ldadd) \
 	-lxkbcommon -ljpeg -lEGL -lm \
 	$(weston_dir)/clients/text-protocol.o \
 	$(NULL)
 
 ibus_wayland_CFLAGS = \
-	@GTK2_CFLAGS@ \
+	@GLIB2_CFLAGS@ \
+	@CAIRO_CFLAGS@ \
 	@DBUS_CFLAGS@ \
-	@WAYLAND_CLIENT_CFLAGS@ \
-	@WAYLAND_EGL_CFLAGS@ \
-	@WAYLAND_CURSOR_CFLAGS@ \
+	@WAYLAND_CFLAGS@ \
 	-I$(weston_dir)/clients \
 	-I$(top_srcdir)/src \
 	-I$(top_builddir)/src \

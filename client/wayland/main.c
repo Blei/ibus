@@ -26,8 +26,6 @@
 #include <sys/mman.h>
 #include <sys/epoll.h>
 
-#include <gdk/gdk.h>
-
 #include <ibus.h>
 
 #include <text-client-protocol.h>
@@ -154,38 +152,29 @@ input_method_keymap(void *data,
 }
 
 static void
-translate_key(GdkEventKey *event,
-              xkb_keysym_t sym,
-              struct ibus_ime *ime,
-              enum wl_keyboard_key_state state,
-              uint32_t keycode,
-              uint32_t time)
+process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
+            enum wl_keyboard_key_state state)
 {
-    event->time = time;
-    event->window = NULL;
-    event->send_event = 0; // FIXME what to do?
-    event->type = state == WL_KEYBOARD_KEY_STATE_RELEASED ? GDK_KEY_RELEASE : GDK_KEY_PRESS;
-    event->group = 0; // FIXME this should be possible to find out
-    event->hardware_keycode = keycode;
-
-    event->state = 0;
+    guint32 key_state = 0;
     if (ime->modifiers & MOD_CONTROL_MASK)
-        event->state |= GDK_CONTROL_MASK;
+        key_state |= IBUS_CONTROL_MASK;
     if (ime->modifiers & MOD_SHIFT_MASK)
-        event->state |= GDK_SHIFT_MASK;
+        key_state |= IBUS_SHIFT_MASK;
     if (ime->modifiers & MOD_ALT_MASK)
-        event->state |= GDK_MOD1_MASK;
+        key_state |= IBUS_MOD1_MASK;
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
-        event->state |= IBUS_RELEASE_MASK;
+        key_state |= IBUS_RELEASE_MASK;
 
-    // Looks wrong, but is equivalent to what the XIM backend does.
-    event->is_modifier = 0;
-    event->string = NULL;
-    event->length = 0;
+    gboolean retval = ibus_input_context_process_key_event (
+        ime->context,
+        sym,
+        key - 8,
+        key_state);
 
-    // HACK: The gdk keysyms are auto generated from the xkb ones, this should
-    // be equivalent. Did some spot checks, everything looks correct.
-    event->keyval = sym;
+    if (!retval) {
+        // The key event could not be processed correctly.
+        // TODO forward the key event to the application
+    }
 }
 
 static void
@@ -233,19 +222,7 @@ input_method_key(void *data,
         sym = syms[0];
     // end of copied code
 
-    GdkEventKey event;
-    translate_key(&event, sym, ime, state, key, time);
-
-    gboolean retval = ibus_input_context_process_key_event (
-        ime->context,
-        event.keyval,
-        event.hardware_keycode - 8,
-        event.state);
-
-    if (!retval) {
-        // The key event could not be processed correctly.
-        // TODO forward the key event to the application
-    }
+    process_key(ime, key, sym, state);
 }
 
 static void
