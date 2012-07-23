@@ -34,6 +34,7 @@
 struct ibus_ime {
     struct display *display;
     struct input_method *input_method;
+    struct wl_keyboard *input_method_keyboard;
 
     uint32_t modifiers;
     struct {
@@ -97,7 +98,7 @@ input_method_reset(void *data,
 
 static void
 input_method_keymap(void *data,
-                    struct input_method *input_method,
+                    struct wl_keyboard *wl_keyboard,
                     uint32_t format,
                     int32_t fd,
                     uint32_t size)
@@ -179,7 +180,7 @@ process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
 
 static void
 input_method_key(void *data,
-                 struct input_method *input_method,
+                 struct wl_keyboard *wl_keyboard,
                  uint32_t serial,
                  uint32_t time,
                  uint32_t key,
@@ -227,7 +228,7 @@ input_method_key(void *data,
 
 static void
 input_method_modifiers(void *data,
-                       struct input_method *input_method,
+                       struct wl_keyboard *wl_keyboard,
                        uint32_t serial,
                        uint32_t mods_depressed,
                        uint32_t mods_latched,
@@ -241,11 +242,16 @@ input_method_modifiers(void *data,
                           mods_locked, 0, 0, group);
 }
 
-static const struct input_method_listener input_method_listener = {
-    input_method_reset,
+static const struct wl_keyboard_listener input_method_keyboard_listener = {
     input_method_keymap,
+    NULL, /* enter */
+    NULL, /* leave */
     input_method_key,
     input_method_modifiers
+};
+
+static const struct input_method_listener input_method_listener = {
+    input_method_reset
 };
 
 static void
@@ -259,7 +265,11 @@ global_handler(struct wl_display *display, uint32_t id,
         input_method_add_listener(ime->input_method,
                                   &input_method_listener,
                                   ime);
-        input_method_request_keyboard_input(ime->input_method, 1);
+        ime->input_method_keyboard =
+            input_method_request_keyboard(ime->input_method);
+        wl_keyboard_add_listener(ime->input_method_keyboard,
+                                 &input_method_keyboard_listener,
+                                 ime);
     }
 }
 
@@ -292,15 +302,15 @@ _send_preedit(struct ibus_ime *ime)
 {
     int i;
     IBusAttribute *ibus_attr;
+    char *str = ime->preedit_string;
 
-    input_method_preedit_string(ime->input_method, ime->preedit_string,
-                                ime->preedit_cursor);
+    input_method_preedit_string(ime->input_method, str, ime->preedit_cursor);
 
     for (i = 0; (ibus_attr = ibus_attr_list_get(ime->preedit_attrs, i)) != NULL ; ++i) {
         uint32_t type, value;
 
-        uint32_t start = ibus_attr->start_index;
-        uint32_t end = ibus_attr->end_index;
+        uint32_t start = g_utf8_offset_to_pointer(str, ibus_attr->start_index) - str;
+        uint32_t end   = g_utf8_offset_to_pointer(str, ibus_attr->end_index) - str;
 
         switch (ibus_attr->type) {
         case IBUS_ATTR_TYPE_UNDERLINE:
@@ -319,8 +329,8 @@ _send_preedit(struct ibus_ime *ime)
                 value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_LOW;
                 break;
             case IBUS_ATTR_UNDERLINE_ERROR:
-                // FIXME should we support this?
-                continue;
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_ERROR;
+                break;
             default:
                 assert(false && "unknown ibus underline type");
             }
