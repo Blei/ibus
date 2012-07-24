@@ -23,8 +23,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
+#include <sys/time.h>
 
 #include <ibus.h>
 
@@ -152,7 +153,7 @@ input_method_keymap(void *data,
         1 << xkb_map_mod_get_index(ime->xkb.keymap, "Shift");
 }
 
-static void
+static gboolean
 process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
             enum wl_keyboard_key_state state)
 {
@@ -166,16 +167,11 @@ process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
         key_state |= IBUS_RELEASE_MASK;
 
-    gboolean retval = ibus_input_context_process_key_event (
+    return ibus_input_context_process_key_event (
         ime->context,
         sym,
         key - 8,
         key_state);
-
-    if (!retval) {
-        // The key event could not be processed correctly.
-        // TODO forward the key event to the application
-    }
 }
 
 static void
@@ -197,7 +193,7 @@ input_method_key(void *data,
 
     // HACK: this is here because wayland/weston doesn't do ime focus yet
     if (!ime->focused) {
-        //ibus_input_context_focus_in(ime->context);
+        ibus_input_context_focus_in(ime->context);
         ime->focused = true;
     }
 
@@ -223,7 +219,12 @@ input_method_key(void *data,
         sym = syms[0];
     // end of copied code
 
-    process_key(ime, key, sym, state);
+    gboolean processed = process_key(ime, key, sym, state);
+
+    if (!processed) {
+        // The key event could not be processed correctly.
+        input_method_forward_key(ime->input_method, time, key, state_w);
+    }
 }
 
 static void
@@ -294,7 +295,17 @@ _context_forward_key_event_cb (IBusInputContext *context,
 {
     g_assert (ime);
 
-    // TODO implement this as soon as wayland/weston supports it
+    fprintf(stderr, "forward key event\n");
+
+    uint32_t key = keycode + 8;
+    enum wl_keyboard_key_state state_w = state & IBUS_RELEASE_MASK ?
+        WL_KEYBOARD_KEY_STATE_RELEASED : WL_KEYBOARD_KEY_STATE_PRESSED;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint32_t time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+    input_method_forward_key(ime->input_method, time, key, state_w);
 }
 
 static void
@@ -533,8 +544,8 @@ ibus_source_dispatch(GSource *source,
 {
     struct ibus_ime_source *ime_source = (struct ibus_ime_source *) source;
 
-    display_iteration_deferred(ime_source->ime->display);
     display_iteration_epoll(ime_source->ime->display, 0);
+    display_iteration_deferred(ime_source->ime->display);
 
     // FIXME: what's the significance of the return value?
     return TRUE;
