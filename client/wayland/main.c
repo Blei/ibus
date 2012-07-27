@@ -32,6 +32,20 @@
 #include <text-client-protocol.h>
 #include <window.h>
 
+struct ibus_ime_context {
+    struct ibus_ime *ime;
+    IBusInputContext *ibus_context;
+    uint32_t text_model_id;
+
+    char *preedit_string;
+    IBusAttrList *preedit_attrs;
+    uint32_t preedit_cursor;
+    bool preedit_visible;
+    bool preedit_started;
+
+    bool focused;
+};
+
 struct ibus_ime {
     struct display *display;
     struct input_method *input_method;
@@ -48,15 +62,8 @@ struct ibus_ime {
     } xkb;
 
     IBusBus *bus;
-    IBusInputContext *context;
-
-    char *preedit_string;
-    IBusAttrList *preedit_attrs;
-    uint32_t preedit_cursor;
-    bool preedit_visible;
-    bool preedit_started;
-
-    bool focused;
+    GHashTable *context_hash_table;
+    struct ibus_ime_context *active_context;
 };
 
 struct ibus_ime_source {
@@ -67,20 +74,254 @@ struct ibus_ime_source {
 };
 
 static void
-reset_ibus_ime(struct ibus_ime *ime)
+reset_ibus_ime_context(struct ibus_ime_context *context)
 {
-    if (ime->preedit_string) {
-        free(ime->preedit_string);
-        ime->preedit_string = NULL;
+    if (context->preedit_string) {
+        free(context->preedit_string);
+        context->preedit_string = NULL;
     }
-    if (ime->preedit_attrs) {
-        g_object_unref (ime->preedit_attrs);
-        ime->preedit_attrs = NULL;
+    if (context->preedit_attrs) {
+        g_object_unref (context->preedit_attrs);
+        context->preedit_attrs = NULL;
     }
-    ime->preedit_cursor = 0;
-    ime->preedit_visible = false;
-    ime->preedit_started = false;
-    ime->focused = false;
+    context->preedit_cursor = 0;
+    context->preedit_visible = false;
+    context->preedit_started = false;
+    context->focused = false;
+    ibus_input_context_reset(context->ibus_context);
+}
+
+static void
+_context_commit_text_cb (IBusInputContext        *ibus_context,
+                         IBusText                *text,
+                         struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (IBUS_IS_TEXT (text));
+    g_assert (context);
+
+    input_method_commit_string(context->ime->input_method, text->text, -1);
+}
+
+static void
+_context_forward_key_event_cb (IBusInputContext        *ibus_context,
+                               guint                    keyval,
+                               guint                    keycode,
+                               guint                    state,
+                               struct ibus_ime_context *context)
+{
+    g_assert (context);
+
+    fprintf(stderr, "forward key event\n");
+
+    uint32_t key = keycode + 8;
+    enum wl_keyboard_key_state state_w = state & IBUS_RELEASE_MASK ?
+        WL_KEYBOARD_KEY_STATE_RELEASED : WL_KEYBOARD_KEY_STATE_PRESSED;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint32_t time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+    input_method_forward_key(context->ime->input_method, time, key, state_w);
+}
+
+static void
+_send_preedit(struct ibus_ime *ime)
+{
+    int i;
+    IBusAttribute *ibus_attr;
+    struct ibus_ime_context *context = ime->active_context;
+    char *str;
+
+    assert(context && "no active context");
+
+    str = context->preedit_string;
+    input_method_preedit_string(ime->input_method, str, context->preedit_cursor);
+
+    for (i = 0; (ibus_attr = ibus_attr_list_get(context->preedit_attrs, i)) != NULL ; ++i) {
+        uint32_t type, value;
+
+        uint32_t start = g_utf8_offset_to_pointer(str, ibus_attr->start_index) - str;
+        uint32_t end   = g_utf8_offset_to_pointer(str, ibus_attr->end_index) - str;
+
+        switch (ibus_attr->type) {
+        case IBUS_ATTR_TYPE_UNDERLINE:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_UNDERLINE;
+            switch (ibus_attr->value) {
+            case IBUS_ATTR_UNDERLINE_NONE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_NONE;
+                break;
+            case IBUS_ATTR_UNDERLINE_SINGLE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_SINGLE;
+                break;
+            case IBUS_ATTR_UNDERLINE_DOUBLE:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_DOUBLE;
+                break;
+            case IBUS_ATTR_UNDERLINE_LOW:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_LOW;
+                break;
+            case IBUS_ATTR_UNDERLINE_ERROR:
+                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_ERROR;
+                break;
+            default:
+                assert(false && "unknown ibus underline type");
+            }
+            break;
+
+        case IBUS_ATTR_TYPE_FOREGROUND:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_FOREGROUND;
+            value = ibus_attr->value;
+            break;
+        case IBUS_ATTR_TYPE_BACKGROUND:
+            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_BACKGROUND;
+            value = ibus_attr->value;
+            break;
+        default:
+            assert(false && "unknown ibus attribute type");
+        }
+        input_method_preedit_styling(ime->input_method, type, value, start, end);
+    }
+}
+
+static void
+_update_preedit(struct ibus_ime *ime)
+{
+    struct ibus_ime_context *context = ime->active_context;
+
+    assert(context && "no active context");
+
+    if (context->preedit_visible) {
+        if (!context->preedit_started) {
+            context->preedit_started = true;
+        }
+        _send_preedit(ime);
+    } else if (context->preedit_started) {
+        input_method_preedit_string(ime->input_method, "", 0);
+        context->preedit_started = false;
+    }
+}
+
+static void
+_context_update_preedit_text_cb (IBusInputContext        *ibus_context,
+                                 IBusText                *text,
+                                 gint                     cursor_pos,
+                                 gboolean                 visible,
+                                 struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (IBUS_IS_TEXT (text));
+    g_assert (context);
+
+    if (context->ime->active_context != context) {
+        fprintf(stderr, "wut? update preedit\n");
+        return;
+    }
+
+    if (context->preedit_string) {
+        free(context->preedit_string);
+    }
+    context->preedit_string = strdup(text->text);
+
+    if (context->preedit_attrs) {
+        g_object_unref (context->preedit_attrs);
+    }
+
+    g_object_ref(text->attrs);
+    context->preedit_attrs = text->attrs;
+
+    context->preedit_cursor = cursor_pos;
+    context->preedit_visible = visible;
+
+    _update_preedit (context->ime);
+}
+
+static void
+_context_show_preedit_text_cb (IBusInputContext        *ibus_context,
+                               struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (context);
+
+    if (context->ime->active_context != context) {
+        fprintf(stderr, "wut? show preedit\n");
+        return;
+    }
+
+    context->preedit_visible = true;
+    _update_preedit (context->ime);
+}
+
+static void
+_context_hide_preedit_text_cb (IBusInputContext        *ibus_context,
+                               struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (context);
+
+    if (context->ime->active_context != context) {
+        fprintf(stderr, "wut? hide preedit\n");
+        return;
+    }
+
+    context->preedit_visible = false;
+    _update_preedit (context->ime);
+}
+
+static void
+_context_enabled_cb (IBusInputContext        *ibus_context,
+                     struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (context);
+
+    if (context->ime->active_context != context) {
+        fprintf(stderr, "wut? enabled\n");
+        return;
+    }
+
+    // Is there anything that needs to be done here?
+}
+
+static void
+_context_disabled_cb (IBusInputContext        *ibus_context,
+                      struct ibus_ime_context *context)
+{
+    g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
+    g_assert (context);
+
+    if (context->ime->active_context != context) {
+        fprintf(stderr, "wut? disabled\n");
+        return;
+    }
+
+    reset_ibus_ime_context(context);
+}
+
+static void
+_init_ibus_context (struct ibus_ime *ime, struct ibus_ime_context *context)
+{
+    context->ibus_context = ibus_bus_create_input_context (ime->bus, "wayland");
+    assert(context->ibus_context && "ibus context couldn't be created");
+
+    g_signal_connect (context->ibus_context, "commit-text",
+                      G_CALLBACK (_context_commit_text_cb), context);
+    g_signal_connect (context->ibus_context, "forward-key-event",
+                      G_CALLBACK (_context_forward_key_event_cb), context);
+
+    g_signal_connect (context->ibus_context, "update-preedit-text",
+                      G_CALLBACK (_context_update_preedit_text_cb), context);
+    g_signal_connect (context->ibus_context, "show-preedit-text",
+                      G_CALLBACK (_context_show_preedit_text_cb), context);
+    g_signal_connect (context->ibus_context, "hide-preedit-text",
+                      G_CALLBACK (_context_hide_preedit_text_cb), context);
+    g_signal_connect (context->ibus_context, "enabled",
+                      G_CALLBACK (_context_enabled_cb), context);
+    g_signal_connect (context->ibus_context, "disabled",
+                      G_CALLBACK (_context_disabled_cb), context);
+
+    // TODO add IBUS_CAP_SURROUNDING_TEXT once wayland/weston supports that
+    ibus_input_context_set_capabilities (context->ibus_context,
+                                         IBUS_CAP_FOCUS | IBUS_CAP_PREEDIT_TEXT);
 }
 
 static void
@@ -88,14 +329,110 @@ input_method_reset(void *data,
                    struct input_method *input_method)
 {
     struct ibus_ime *ime = data;
+    struct ibus_ime_context *context = ime->active_context;
 
-    // HACK: this is here because wayland/weston doesn't do ime focus yet
-    if (ime->focused)
-        ibus_input_context_focus_out(ime->context);
+    assert(context && "no active context");
 
-    ibus_input_context_reset(ime->context);
-    reset_ibus_ime(ime);
+    reset_ibus_ime_context(context);
 }
+
+static void
+input_method_create_text_model(void *data,
+                               struct input_method *input_method,
+                               uint32_t text_model_id)
+{
+    struct ibus_ime *ime = data;
+    struct ibus_ime_context *context;
+
+    fprintf(stderr, "create %u\n", text_model_id);
+
+    context = calloc(1, sizeof *context);
+    context->text_model_id = text_model_id;
+    context->ime = ime;
+    _init_ibus_context(ime, context);
+
+    g_hash_table_insert(ime->context_hash_table,
+                        (gpointer) text_model_id,
+                        context);
+}
+
+static void
+input_method_destroy_text_model(void *data,
+                                struct input_method *input_method,
+                                uint32_t text_model_id)
+{
+    struct ibus_ime *ime = data;
+    struct ibus_ime_context *context;
+
+    fprintf(stderr, "destroy %u\n", text_model_id);
+
+    context = g_hash_table_lookup(ime->context_hash_table,
+                                  (gpointer) text_model_id);
+    assert(context && "no context with given id");
+
+    ibus_proxy_destroy((IBusProxy *) context->ibus_context);
+
+    if (context == ime->active_context) {
+        fprintf(stderr, "WARNING: destroying active context\n");
+        ime->active_context = NULL;
+    }
+    g_hash_table_remove(ime->context_hash_table,
+                        (gpointer) text_model_id);
+    free(context);
+}
+
+static void
+input_method_focus_in(void *data,
+                      struct input_method *input_method,
+                      uint32_t text_model_id)
+{
+    struct ibus_ime *ime = data;
+    struct ibus_ime_context *context;
+
+    fprintf(stderr, "focus in %u\n", text_model_id);
+
+    context = g_hash_table_lookup(ime->context_hash_table,
+                                  (gpointer) text_model_id);
+    assert(context && "no context with given id");
+
+    if (ime->active_context)
+        fprintf(stderr, "WARNING: active context exists\n");
+
+    ibus_input_context_focus_in(context->ibus_context);
+    ime->active_context = context;
+}
+
+static void
+input_method_focus_out(void *data,
+                       struct input_method *input_method,
+                       uint32_t text_model_id)
+{
+    struct ibus_ime *ime = data;
+    struct ibus_ime_context *context;
+
+    fprintf(stderr, "focus out %u\n", text_model_id);
+
+    context = g_hash_table_lookup(ime->context_hash_table,
+                                  (gpointer) text_model_id);
+    assert(context && "no context with given id");
+
+    ibus_input_context_focus_out(context->ibus_context);
+
+    if (ime->active_context) {
+        if (ime->active_context->text_model_id == text_model_id)
+            ime->active_context = NULL;
+        else
+            fprintf(stderr, "WARNING: active context exists\n");
+    }
+}
+
+static const struct input_method_listener input_method_listener = {
+    input_method_reset,
+    input_method_create_text_model,
+    input_method_destroy_text_model,
+    input_method_focus_in,
+    input_method_focus_out
+};
 
 static void
 input_method_keymap(void *data,
@@ -157,7 +494,11 @@ static gboolean
 process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
             enum wl_keyboard_key_state state)
 {
+    struct ibus_ime_context *context = ime->active_context;
     guint32 key_state = 0;
+
+    assert(context && "no active context");
+
     if (ime->modifiers & MOD_CONTROL_MASK)
         key_state |= IBUS_CONTROL_MASK;
     if (ime->modifiers & MOD_SHIFT_MASK)
@@ -168,7 +509,7 @@ process_key(struct ibus_ime *ime, uint32_t key, xkb_keysym_t sym,
         key_state |= IBUS_RELEASE_MASK;
 
     return ibus_input_context_process_key_event (
-        ime->context,
+        context->ibus_context,
         sym,
         key - 8,
         key_state);
@@ -190,12 +531,6 @@ input_method_key(void *data,
     const xkb_keysym_t *syms;
     xkb_keysym_t sym;
     xkb_mod_mask_t mask;
-
-    // HACK: this is here because wayland/weston doesn't do ime focus yet
-    if (!ime->focused) {
-        ibus_input_context_focus_in(ime->context);
-        ime->focused = true;
-    }
 
     code = key + 8;
     if (!ime->xkb.state)
@@ -251,10 +586,6 @@ static const struct wl_keyboard_listener input_method_keyboard_listener = {
     input_method_modifiers
 };
 
-static const struct input_method_listener input_method_listener = {
-    input_method_reset
-};
-
 static void
 global_handler(struct wl_display *display, uint32_t id,
                const char *interface, uint32_t version, void *data)
@@ -272,179 +603,6 @@ global_handler(struct wl_display *display, uint32_t id,
                                  &input_method_keyboard_listener,
                                  ime);
     }
-}
-
-static void
-_context_commit_text_cb (IBusInputContext *context,
-                         IBusText         *text,
-                         struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (IBUS_IS_TEXT (text));
-    g_assert (ime != NULL);
-
-    input_method_commit_string(ime->input_method, text->text, -1);
-}
-
-static void
-_context_forward_key_event_cb (IBusInputContext *context,
-                               guint             keyval,
-                               guint             keycode,
-                               guint             state,
-                               struct ibus_ime  *ime)
-{
-    g_assert (ime);
-
-    fprintf(stderr, "forward key event\n");
-
-    uint32_t key = keycode + 8;
-    enum wl_keyboard_key_state state_w = state & IBUS_RELEASE_MASK ?
-        WL_KEYBOARD_KEY_STATE_RELEASED : WL_KEYBOARD_KEY_STATE_PRESSED;
-
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    uint32_t time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-
-    input_method_forward_key(ime->input_method, time, key, state_w);
-}
-
-static void
-_send_preedit(struct ibus_ime *ime)
-{
-    int i;
-    IBusAttribute *ibus_attr;
-    char *str = ime->preedit_string;
-
-    input_method_preedit_string(ime->input_method, str, ime->preedit_cursor);
-
-    for (i = 0; (ibus_attr = ibus_attr_list_get(ime->preedit_attrs, i)) != NULL ; ++i) {
-        uint32_t type, value;
-
-        uint32_t start = g_utf8_offset_to_pointer(str, ibus_attr->start_index) - str;
-        uint32_t end   = g_utf8_offset_to_pointer(str, ibus_attr->end_index) - str;
-
-        switch (ibus_attr->type) {
-        case IBUS_ATTR_TYPE_UNDERLINE:
-            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_UNDERLINE;
-            switch (ibus_attr->value) {
-            case IBUS_ATTR_UNDERLINE_NONE:
-                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_NONE;
-                break;
-            case IBUS_ATTR_UNDERLINE_SINGLE:
-                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_SINGLE;
-                break;
-            case IBUS_ATTR_UNDERLINE_DOUBLE:
-                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_DOUBLE;
-                break;
-            case IBUS_ATTR_UNDERLINE_LOW:
-                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_LOW;
-                break;
-            case IBUS_ATTR_UNDERLINE_ERROR:
-                value = TEXT_MODEL_PREEDIT_UNDERLINE_TYPE_ERROR;
-                break;
-            default:
-                assert(false && "unknown ibus underline type");
-            }
-            break;
-
-        case IBUS_ATTR_TYPE_FOREGROUND:
-            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_FOREGROUND;
-            value = ibus_attr->value;
-            break;
-        case IBUS_ATTR_TYPE_BACKGROUND:
-            type = TEXT_MODEL_PREEDIT_STYLE_TYPE_BACKGROUND;
-            value = ibus_attr->value;
-            break;
-        default:
-            assert(false && "unknown ibus attribute type");
-        }
-        input_method_preedit_styling(ime->input_method, type, value, start, end);
-    }
-}
-
-static void
-_update_preedit(struct ibus_ime *ime)
-{
-    if (ime->preedit_visible) {
-        if (!ime->preedit_started) {
-            ime->preedit_started = true;
-        }
-        _send_preedit(ime);
-    } else if (ime->preedit_started) {
-        input_method_preedit_string(ime->input_method, "", 0);
-        ime->preedit_started = false;
-    }
-}
-
-static void
-_context_update_preedit_text_cb (IBusInputContext *context,
-                                 IBusText         *text,
-                                 gint              cursor_pos,
-                                 gboolean          visible,
-                                 struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (IBUS_IS_TEXT (text));
-    g_assert (ime);
-
-    if (ime->preedit_string) {
-        free(ime->preedit_string);
-    }
-    ime->preedit_string = strdup(text->text);
-
-    if (ime->preedit_attrs) {
-        g_object_unref (ime->preedit_attrs);
-    }
-
-    g_object_ref(text->attrs);
-    ime->preedit_attrs = text->attrs;
-
-    ime->preedit_cursor = cursor_pos;
-    ime->preedit_visible = visible;
-
-    _update_preedit (ime);
-}
-
-static void
-_context_show_preedit_text_cb (IBusInputContext *context,
-                               struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (ime);
-
-    ime->preedit_visible = true;
-    _update_preedit (ime);
-}
-
-static void
-_context_hide_preedit_text_cb (IBusInputContext *context,
-                               struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (ime);
-
-    ime->preedit_visible = false;
-    _update_preedit (ime);
-}
-
-static void
-_context_enabled_cb (IBusInputContext *context,
-                     struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (ime);
-
-    // Is there anything that needs to be done here?
-}
-
-static void
-_context_disabled_cb (IBusInputContext *context,
-                      struct ibus_ime  *ime)
-{
-    g_assert (IBUS_IS_INPUT_CONTEXT (context));
-    g_assert (ime);
-
-    reset_ibus_ime(ime);
 }
 
 static void
@@ -468,40 +626,6 @@ _init_ibus_bus (struct ibus_ime *ime)
 
     g_signal_connect (ime->bus, "disconnected",
                       G_CALLBACK (_bus_disconnected_cb), NULL);
-}
-
-static void
-_init_ibus_context (struct ibus_ime *ime)
-{
-    ime->context = ibus_bus_create_input_context (ime->bus, "wayland");
-    assert(ime->context && "ibus context couldn't be created");
-
-    g_signal_connect (ime->context, "commit-text",
-                        G_CALLBACK (_context_commit_text_cb), ime);
-    g_signal_connect (ime->context, "forward-key-event",
-                        G_CALLBACK (_context_forward_key_event_cb), ime);
-
-    g_signal_connect (ime->context, "update-preedit-text",
-                        G_CALLBACK (_context_update_preedit_text_cb), ime);
-    g_signal_connect (ime->context, "show-preedit-text",
-                        G_CALLBACK (_context_show_preedit_text_cb), ime);
-    g_signal_connect (ime->context, "hide-preedit-text",
-                        G_CALLBACK (_context_hide_preedit_text_cb), ime);
-    g_signal_connect (ime->context, "enabled",
-                        G_CALLBACK (_context_enabled_cb), ime);
-    g_signal_connect (ime->context, "disabled",
-                        G_CALLBACK (_context_disabled_cb), ime);
-
-    // TODO add IBUS_CAP_SURROUNDING_TEXT once wayland/weston supports that
-    ibus_input_context_set_capabilities (ime->context,
-                                         IBUS_CAP_FOCUS | IBUS_CAP_PREEDIT_TEXT);
-}
-
-static void
-init_ibus (struct ibus_ime *ime)
-{
-    _init_ibus_bus(ime);
-    _init_ibus_context(ime);
 }
 
 gboolean
@@ -595,18 +719,19 @@ int
 main(int argc, char *argv[])
 {
     struct ibus_ime ime;
-    memset(&ime, 0, sizeof ime);
 
     g_type_init();
 
-    init_ibus(&ime);
+    memset(&ime, 0, sizeof ime);
+    /* We use uint32_t as keys, use direct hashing */
+    ime.context_hash_table = g_hash_table_new(NULL, NULL);
+
+    _init_ibus_bus(&ime);
 
     if (!ibus_bus_is_connected (ime.bus)) {
         g_warning ("Can not connect to ibus daemon");
         exit (EXIT_FAILURE);
     }
-
-    reset_ibus_ime(&ime);
 
     ime.xkb.context = xkb_context_new(0);
     if (ime.xkb.context == NULL) {
@@ -627,6 +752,7 @@ main(int argc, char *argv[])
 
     run_main_loop(&ime);
 
+    g_hash_table_unref(ime.context_hash_table);
     g_object_unref (ime.bus);
     xkb_state_unref(ime.xkb.state);
     xkb_map_unref(ime.xkb.keymap);
