@@ -35,7 +35,7 @@
 struct ibus_ime_context {
     struct ibus_ime *ime;
     IBusInputContext *ibus_context;
-    uint32_t text_model_id;
+    struct input_method_context *ime_context;
 
     char *preedit_string;
     IBusAttrList *preedit_attrs;
@@ -62,7 +62,6 @@ struct ibus_ime {
     } xkb;
 
     IBusBus *bus;
-    GHashTable *context_hash_table;
     struct ibus_ime_context *active_context;
 };
 
@@ -100,7 +99,7 @@ _context_commit_text_cb (IBusInputContext        *ibus_context,
     g_assert (IBUS_IS_TEXT (text));
     g_assert (context);
 
-    input_method_commit_string(context->ime->input_method, text->text, -1);
+    input_method_context_commit_string(context->ime_context, text->text, -1);
 }
 
 static void
@@ -122,21 +121,20 @@ _context_forward_key_event_cb (IBusInputContext        *ibus_context,
     gettimeofday(&tv, NULL);
     uint32_t time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
-    input_method_forward_key(context->ime->input_method, time, key, state_w);
+    input_method_context_forward_key(context->ime_context, time, key, state_w);
 }
 
 static void
-_send_preedit(struct ibus_ime *ime)
+_send_preedit(struct ibus_ime_context *context)
 {
     int i;
     IBusAttribute *ibus_attr;
-    struct ibus_ime_context *context = ime->active_context;
     char *str;
 
     assert(context && "no active context");
 
     str = context->preedit_string;
-    input_method_preedit_string(ime->input_method, str, context->preedit_cursor);
+    input_method_context_preedit_string(context->ime_context, str, context->preedit_cursor);
 
     for (i = 0; (ibus_attr = ibus_attr_list_get(context->preedit_attrs, i)) != NULL ; ++i) {
         uint32_t type, value;
@@ -179,24 +177,20 @@ _send_preedit(struct ibus_ime *ime)
         default:
             assert(false && "unknown ibus attribute type");
         }
-        input_method_preedit_styling(ime->input_method, type, value, start, end);
+        input_method_context_preedit_styling(context->ime_context, type, value, start, end);
     }
 }
 
 static void
-_update_preedit(struct ibus_ime *ime)
+_update_preedit(struct ibus_ime_context *context)
 {
-    struct ibus_ime_context *context = ime->active_context;
-
-    assert(context && "no active context");
-
     if (context->preedit_visible) {
         if (!context->preedit_started) {
             context->preedit_started = true;
         }
-        _send_preedit(ime);
+        _send_preedit(context);
     } else if (context->preedit_started) {
-        input_method_preedit_string(ime->input_method, "", 0);
+        input_method_context_preedit_string(context->ime_context, "", 0);
         context->preedit_started = false;
     }
 }
@@ -211,11 +205,6 @@ _context_update_preedit_text_cb (IBusInputContext        *ibus_context,
     g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
     g_assert (IBUS_IS_TEXT (text));
     g_assert (context);
-
-    if (context->ime->active_context != context) {
-        fprintf(stderr, "wut? update preedit\n");
-        return;
-    }
 
     if (context->preedit_string) {
         free(context->preedit_string);
@@ -232,7 +221,7 @@ _context_update_preedit_text_cb (IBusInputContext        *ibus_context,
     context->preedit_cursor = cursor_pos;
     context->preedit_visible = visible;
 
-    _update_preedit (context->ime);
+    _update_preedit (context);
 }
 
 static void
@@ -242,13 +231,8 @@ _context_show_preedit_text_cb (IBusInputContext        *ibus_context,
     g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
     g_assert (context);
 
-    if (context->ime->active_context != context) {
-        fprintf(stderr, "wut? show preedit\n");
-        return;
-    }
-
     context->preedit_visible = true;
-    _update_preedit (context->ime);
+    _update_preedit (context);
 }
 
 static void
@@ -258,13 +242,8 @@ _context_hide_preedit_text_cb (IBusInputContext        *ibus_context,
     g_assert (IBUS_IS_INPUT_CONTEXT (ibus_context));
     g_assert (context);
 
-    if (context->ime->active_context != context) {
-        fprintf(stderr, "wut? hide preedit\n");
-        return;
-    }
-
     context->preedit_visible = false;
-    _update_preedit (context->ime);
+    _update_preedit (context);
 }
 
 static void
@@ -325,75 +304,13 @@ _init_ibus_context (struct ibus_ime *ime, struct ibus_ime_context *context)
 }
 
 static void
-input_method_reset(void *data,
-                   struct input_method *input_method)
+input_method_context_focus_in(void *data,
+                              struct input_method_context *input_method_context)
 {
-    struct ibus_ime *ime = data;
-    struct ibus_ime_context *context = ime->active_context;
+    struct ibus_ime_context *context = data;
+    struct ibus_ime *ime = context->ime;
 
-    assert(context && "no active context");
-
-    reset_ibus_ime_context(context);
-}
-
-static void
-input_method_create_text_model(void *data,
-                               struct input_method *input_method,
-                               uint32_t text_model_id)
-{
-    struct ibus_ime *ime = data;
-    struct ibus_ime_context *context;
-
-    fprintf(stderr, "create %u\n", text_model_id);
-
-    context = calloc(1, sizeof *context);
-    context->text_model_id = text_model_id;
-    context->ime = ime;
-    _init_ibus_context(ime, context);
-
-    g_hash_table_insert(ime->context_hash_table,
-                        (gpointer) text_model_id,
-                        context);
-}
-
-static void
-input_method_destroy_text_model(void *data,
-                                struct input_method *input_method,
-                                uint32_t text_model_id)
-{
-    struct ibus_ime *ime = data;
-    struct ibus_ime_context *context;
-
-    fprintf(stderr, "destroy %u\n", text_model_id);
-
-    context = g_hash_table_lookup(ime->context_hash_table,
-                                  (gpointer) text_model_id);
-    assert(context && "no context with given id");
-
-    ibus_proxy_destroy((IBusProxy *) context->ibus_context);
-
-    if (context == ime->active_context) {
-        fprintf(stderr, "WARNING: destroying active context\n");
-        ime->active_context = NULL;
-    }
-    g_hash_table_remove(ime->context_hash_table,
-                        (gpointer) text_model_id);
-    free(context);
-}
-
-static void
-input_method_focus_in(void *data,
-                      struct input_method *input_method,
-                      uint32_t text_model_id)
-{
-    struct ibus_ime *ime = data;
-    struct ibus_ime_context *context;
-
-    fprintf(stderr, "focus in %u\n", text_model_id);
-
-    context = g_hash_table_lookup(ime->context_hash_table,
-                                  (gpointer) text_model_id);
-    assert(context && "no context with given id");
+    fprintf(stderr, "focus in\n");
 
     if (ime->active_context)
         fprintf(stderr, "WARNING: active context exists\n");
@@ -403,35 +320,84 @@ input_method_focus_in(void *data,
 }
 
 static void
-input_method_focus_out(void *data,
-                       struct input_method *input_method,
-                       uint32_t text_model_id)
+input_method_context_focus_out(void *data,
+                               struct input_method_context *input_method_context)
+{
+    struct ibus_ime_context *context = data;
+    struct ibus_ime *ime = context->ime;
+
+    fprintf(stderr, "focus out\n");
+
+    ibus_input_context_focus_out(context->ibus_context);
+
+    if (!ime->active_context) {
+        fprintf(stderr, "WARNING: no active context\n");
+        return;
+    }
+
+    if (ime->active_context != context)
+        fprintf(stderr, "WARNING: active context exists\n");
+
+    ime->active_context = NULL;
+}
+
+static void
+input_method_context_reset(void *data,
+                           struct input_method_context *input_method_context)
+{
+    struct ibus_ime_context *context = data;
+
+    reset_ibus_ime_context(context);
+}
+
+static void
+input_method_context_destroy_me(void *data,
+                                struct input_method_context *input_method_context)
+{
+    struct ibus_ime_context *context = data;
+    struct ibus_ime *ime = context->ime;
+
+    fprintf(stderr, "destroy\n");
+
+    ibus_proxy_destroy((IBusProxy *) context->ibus_context);
+
+    if (context == ime->active_context) {
+        fprintf(stderr, "WARNING: destroying active context\n");
+        ime->active_context = NULL;
+    }
+    input_method_context_destroy(input_method_context);
+    free(context);
+}
+
+static const
+struct input_method_context_listener input_method_context_listener = {
+    input_method_context_focus_in,
+    input_method_context_focus_out,
+    input_method_context_reset,
+    input_method_context_destroy_me,
+};
+
+static void
+input_method_create_context(void *data,
+                            struct input_method *input_method,
+                            struct input_method_context *input_method_context)
 {
     struct ibus_ime *ime = data;
     struct ibus_ime_context *context;
 
-    fprintf(stderr, "focus out %u\n", text_model_id);
+    fprintf(stderr, "create\n");
 
-    context = g_hash_table_lookup(ime->context_hash_table,
-                                  (gpointer) text_model_id);
-    assert(context && "no context with given id");
-
-    ibus_input_context_focus_out(context->ibus_context);
-
-    if (ime->active_context) {
-        if (ime->active_context->text_model_id == text_model_id)
-            ime->active_context = NULL;
-        else
-            fprintf(stderr, "WARNING: active context exists\n");
-    }
+    context = calloc(1, sizeof *context);
+    context->ime_context = input_method_context;
+    context->ime = ime;
+    input_method_context_add_listener(input_method_context,
+                                      &input_method_context_listener,
+                                      context);
+    _init_ibus_context(ime, context);
 }
 
 static const struct input_method_listener input_method_listener = {
-    input_method_reset,
-    input_method_create_text_model,
-    input_method_destroy_text_model,
-    input_method_focus_in,
-    input_method_focus_out
+    input_method_create_context,
 };
 
 static void
@@ -524,6 +490,9 @@ input_method_key(void *data,
                  uint32_t state_w)
 {
     struct ibus_ime *ime = data;
+    struct ibus_ime_context *context = ime->active_context;
+
+    assert(context && "no active context");
 
     // XXX: copied from window.c
     uint32_t code, num_syms;
@@ -558,7 +527,7 @@ input_method_key(void *data,
 
     if (!processed) {
         // The key event could not be processed correctly.
-        input_method_forward_key(ime->input_method, time, key, state_w);
+        input_method_context_forward_key(context->ime_context, time, key, state_w);
     }
 }
 
@@ -723,8 +692,6 @@ main(int argc, char *argv[])
     g_type_init();
 
     memset(&ime, 0, sizeof ime);
-    /* We use uint32_t as keys, use direct hashing */
-    ime.context_hash_table = g_hash_table_new(NULL, NULL);
 
     _init_ibus_bus(&ime);
 
@@ -752,7 +719,6 @@ main(int argc, char *argv[])
 
     run_main_loop(&ime);
 
-    g_hash_table_unref(ime.context_hash_table);
     g_object_unref (ime.bus);
     xkb_state_unref(ime.xkb.state);
     xkb_map_unref(ime.xkb.keymap);
