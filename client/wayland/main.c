@@ -351,6 +351,22 @@ input_method_context_reset(void *data,
 }
 
 static void
+input_method_context_set_cursor_rectangle(void *data,
+					  struct input_method_context *input_method_context,
+					  int32_t x,
+					  int32_t y,
+					  int32_t width,
+					  int32_t height)
+{
+	struct ibus_ime_context *context = data;
+
+        fprintf(stderr, "cursor at %dx%d, size %dx%d\n", x, y, width, height);
+
+        ibus_input_context_set_cursor_location(context->ibus_context,
+                                               x, y, width, height);
+}
+
+static void
 input_method_context_destroy_me(void *data,
                                 struct input_method_context *input_method_context)
 {
@@ -374,6 +390,7 @@ struct input_method_context_listener input_method_context_listener = {
     input_method_context_focus_in,
     input_method_context_focus_out,
     input_method_context_reset,
+    input_method_context_set_cursor_rectangle,
     input_method_context_destroy_me,
 };
 
